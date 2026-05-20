@@ -317,6 +317,7 @@ typedef enum {
   GHOST_kEventDraggingDropDone,
 
   GHOST_kEventOpenMainFile, /* Needed for Cocoa to open double-clicked .blend file at startup. */
+  GHOST_kEventNativeMenuCommand, /* Needed for native platform menus to call Blender operators. */
   GHOST_kEventNativeResolutionChange, /* Needed for Cocoa when window moves to other display. */
 
   GHOST_kEventImeCompositionStart,
@@ -325,6 +326,31 @@ typedef enum {
 
 #define GHOST_kNumEventTypes (GHOST_kEventImeCompositionEnd + 1)
 } GHOST_TEventType;
+
+typedef enum {
+  GHOST_kNativeMenuKeyModifierNone = 0,
+  GHOST_kNativeMenuKeyModifierShift = (1 << 0),
+  GHOST_kNativeMenuKeyModifierControl = (1 << 1),
+  GHOST_kNativeMenuKeyModifierAlt = (1 << 2),
+  GHOST_kNativeMenuKeyModifierOS = (1 << 3),
+} GHOST_TNativeMenuKeyModifier;
+
+typedef enum {
+  GHOST_kNativeMenuItemSeparator = 0,
+  GHOST_kNativeMenuItemSubmenu = 1,
+  GHOST_kNativeMenuItemCommand = 2,
+} GHOST_TNativeMenuItemType;
+
+typedef struct {
+  int type;
+  int depth;
+  const char *identifier;
+  const char *title;
+  const char *command;
+  const char *key_equivalent;
+  int key_modifiers;
+  int enabled;
+} GHOST_TNativeMenuItem;
 
 typedef enum {
 #define GHOST_kStandardCursorFirstCursor int(GHOST_kStandardCursorDefault)

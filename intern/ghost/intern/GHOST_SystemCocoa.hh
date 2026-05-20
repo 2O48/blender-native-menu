@@ -140,6 +140,13 @@ class GHOST_SystemCocoa : public GHOST_System {
   bool handleOpenDocumentRequest(void *filepathStr);
 
   /**
+   * Handle a command selected from Blender's native macOS menu bar.
+   */
+  void handleNativeMenuCommand(const char *command);
+
+  GHOST_TSuccess updateNativeMenu(const GHOST_TNativeMenuItem *items, size_t items_num) override;
+
+  /**
    * Handles a drag & drop destination event. Called by GHOST_WindowCocoa window subclass.
    * \param eventType: The type of drag & drop event.
    * \param draggedObjectType: The type object concerned.

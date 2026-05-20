@@ -342,6 +342,86 @@ static GHOST_TKey convertKey(int rawCode, unichar recvChar)
 static bool g_hasFirstFile = false;
 static char g_firstFileBuf[FIRSTFILEBUFLG];
 
+static NSMenuItem *cocoa_native_menu_item(NSMenu *menu,
+                                          NSString *title,
+                                          id target,
+                                          const char *command,
+                                          NSString *keyEquivalent,
+                                          NSEventModifierFlags modifierMask)
+{
+  NSMenuItem *menuItem = [menu addItemWithTitle:title
+                                         action:@selector(nativeBlenderMenuCommand:)
+                                  keyEquivalent:keyEquivalent];
+  menuItem.target = target;
+  menuItem.representedObject = [NSString stringWithUTF8String:command];
+  menuItem.keyEquivalentModifierMask = modifierMask;
+  return menuItem;
+}
+
+static NSMenu *cocoa_native_submenu_item(NSMenu *menu,
+                                         NSString *title,
+                                         const char *identifier = nullptr)
+{
+  NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+  NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
+  if (identifier != nullptr) {
+    menuItem.representedObject = [NSString stringWithUTF8String:identifier];
+  }
+  menuItem.submenu = submenu;
+  [menu addItem:menuItem];
+  [menuItem release];
+  return [submenu autorelease];
+}
+
+static NSEventModifierFlags cocoa_native_menu_modifier_mask(const int modifiers)
+{
+  NSEventModifierFlags mask = 0;
+  if (modifiers & GHOST_kNativeMenuKeyModifierShift) {
+    mask |= NSEventModifierFlagShift;
+  }
+  if (modifiers & GHOST_kNativeMenuKeyModifierControl) {
+    mask |= NSEventModifierFlagControl;
+  }
+  if (modifiers & GHOST_kNativeMenuKeyModifierAlt) {
+    mask |= NSEventModifierFlagOption;
+  }
+  if (modifiers & GHOST_kNativeMenuKeyModifierOS) {
+    mask |= NSEventModifierFlagCommand;
+  }
+  return mask;
+}
+
+static NSString *cocoa_native_menu_string(const char *value)
+{
+  return value ? [NSString stringWithUTF8String:value] : @"";
+}
+
+static void cocoa_native_menu_add_standard_app_items(NSMenu *appMenu)
+{
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  NSMenuItem *menuItem = [appMenu addItemWithTitle:@"Hide Blender"
+                                           action:@selector(hide:)
+                                    keyEquivalent:@"h"];
+  [menuItem setTarget:NSApp];
+
+  menuItem = [appMenu addItemWithTitle:@"Hide Others"
+                                action:@selector(hideOtherApplications:)
+                         keyEquivalent:@"h"];
+  [menuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+  [menuItem setTarget:NSApp];
+
+  menuItem = [appMenu addItemWithTitle:@"Show All"
+                                action:@selector(unhideAllApplications:)
+                         keyEquivalent:@""];
+  [menuItem setTarget:NSApp];
+
+  [appMenu addItem:[NSMenuItem separatorItem]];
+
+  menuItem = [appMenu addItemWithTitle:@"Quit Blender" action:@selector(terminate:) keyEquivalent:@"q"];
+  [menuItem setTarget:NSApp];
+}
+
 /* TODO: Need to investigate this.
  * Function called too early in creator.c to have g_hasFirstFile == true */
 extern "C" int GHOST_HACK_getFirstFile(char buf[FIRSTFILEBUFLG])
@@ -373,6 +453,7 @@ extern "C" int GHOST_HACK_getFirstFile(char buf[FIRSTFILEBUFLG])
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 - (void)applicationWillTerminate:(NSNotification *)aNotification;
 - (void)applicationWillBecomeActive:(NSNotification *)aNotification;
+- (void)nativeBlenderMenuCommand:(id)sender;
 - (void)toggleFullScreen:(NSNotification *)notification;
 - (void)windowWillClose:(NSNotification *)notification;
 
@@ -449,6 +530,14 @@ extern "C" int GHOST_HACK_getFirstFile(char buf[FIRSTFILEBUFLG])
 - (void)applicationWillBecomeActive:(NSNotification *)aNotification
 {
   m_systemCocoa->handleApplicationBecomeActiveEvent();
+}
+
+- (void)nativeBlenderMenuCommand:(id)sender
+{
+  NSString *command = [sender representedObject];
+  if (command != nil) {
+    m_systemCocoa->handleNativeMenuCommand([command UTF8String]);
+  }
 }
 
 - (void)toggleFullScreen:(NSNotification *)notification
@@ -585,18 +674,57 @@ GHOST_TSuccess GHOST_SystemCocoa::init()
     @autoreleasepool {
       [NSApplication sharedApplication]; /* initializes `NSApp`. */
 
+      if ([NSApp delegate] == nil) {
+        CocoaAppDelegate *appDelegate = [[CocoaAppDelegate alloc] initWithSystemCocoa:this];
+        [NSApp setDelegate:appDelegate];
+      }
+
       if ([NSApp mainMenu] == nil) {
         NSMenu *mainMenubar = [[NSMenu alloc] init];
         NSMenuItem *menuItem;
+        NSMenu *fileMenu;
+        NSMenu *editMenu;
+        NSMenu *renderMenu;
         NSMenu *windowMenu;
+        NSMenu *helpMenu;
         NSMenu *appMenu;
 
         /* Create the application menu. */
         appMenu = [[NSMenu alloc] initWithTitle:@"Blender"];
 
-        [appMenu addItemWithTitle:@"About Blender"
-                           action:@selector(orderFrontStandardAboutPanel:)
-                    keyEquivalent:@""];
+        cocoa_native_menu_item(
+            appMenu, @"About Blender", [NSApp delegate], "OP:WM_OT_splash_about", @"", 0);
+        cocoa_native_menu_item(appMenu, @"Splash Screen", [NSApp delegate], "OP:WM_OT_splash", @"", 0);
+        [appMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(appMenu,
+                               @"Settings...",
+                               [NSApp delegate],
+                               "OP:SCREEN_OT_userpref_show",
+                               @",",
+                               NSEventModifierFlagCommand);
+        [appMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(appMenu,
+                               @"Install Application Template...",
+                               [NSApp delegate],
+                               "OP:PREFERENCES_OT_app_template_install",
+                               @"",
+                               0);
+        NSMenu *systemMenu = cocoa_native_submenu_item(appMenu, @"System", "MENU:TOPBAR_MT_blender_system");
+        cocoa_native_menu_item(systemMenu, @"Reload Scripts", [NSApp delegate], "OP:SCRIPT_OT_reload", @"", 0);
+        [systemMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(
+            systemMenu, @"Memory Statistics", [NSApp delegate], "OP:WM_OT_memory_statistics", @"", 0);
+        cocoa_native_menu_item(systemMenu, @"Debug Menu", [NSApp delegate], "OP:WM_OT_debug_menu", @"", 0);
+        cocoa_native_menu_item(systemMenu, @"Redraw Timer", [NSApp delegate], "OP:WM_OT_redraw_timer", @"", 0);
+        [systemMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(
+            systemMenu, @"Clean Up Space Data", [NSApp delegate], "OP:SCREEN_OT_spacedata_cleanup", @"", 0);
+        cocoa_native_menu_item(systemMenu,
+                               @"Clean Up Operator Presets",
+                               [NSApp delegate],
+                               "OP:WM_OT_operator_presets_cleanup",
+                               @"",
+                               0);
         [appMenu addItem:[NSMenuItem separatorItem]];
 
         menuItem = [appMenu addItemWithTitle:@"Hide Blender"
@@ -626,8 +754,227 @@ GHOST_TSuccess GHOST_SystemCocoa::init()
         [menuItem release];
         [appMenu release];
 
+        /* Create the file menu. */
+        fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+
+        NSMenu *newMenu = cocoa_native_submenu_item(fileMenu, @"New", "MENU:TOPBAR_MT_file_new");
+        cocoa_native_menu_item(newMenu,
+                               @"General",
+                               [NSApp delegate],
+                               "CMD:READ_HOMEFILE_TEMPLATE:",
+                               @"",
+                               0);
+        cocoa_native_menu_item(newMenu,
+                               @"2D Animation",
+                               [NSApp delegate],
+                               "CMD:READ_HOMEFILE_TEMPLATE:2D_Animation",
+                               @"",
+                               0);
+        cocoa_native_menu_item(newMenu,
+                               @"Sculpting",
+                               [NSApp delegate],
+                               "CMD:READ_HOMEFILE_TEMPLATE:Sculpting",
+                               @"",
+                               0);
+        cocoa_native_menu_item(newMenu,
+                               @"Storyboarding",
+                               [NSApp delegate],
+                               "CMD:READ_HOMEFILE_TEMPLATE:Storyboarding",
+                               @"",
+                               0);
+        cocoa_native_menu_item(newMenu, @"VFX", [NSApp delegate], "CMD:READ_HOMEFILE_TEMPLATE:VFX", @"", 0);
+        cocoa_native_menu_item(newMenu,
+                               @"Video Editing",
+                               [NSApp delegate],
+                               "CMD:READ_HOMEFILE_TEMPLATE:Video_Editing",
+                               @"",
+                               0);
+        cocoa_native_menu_item(
+            fileMenu, @"Open...", [NSApp delegate], "OP:WM_OT_open_mainfile", @"o", NSEventModifierFlagCommand);
+        cocoa_native_menu_item(fileMenu,
+                               @"Open Recent",
+                               [NSApp delegate],
+                               "MENU:TOPBAR_MT_file_open_recent",
+                               @"O",
+                               NSEventModifierFlagShift | NSEventModifierFlagCommand);
+        cocoa_native_menu_item(fileMenu, @"Revert", [NSApp delegate], "OP:WM_OT_revert_mainfile", @"", 0);
+        NSMenu *recoverMenu = cocoa_native_submenu_item(fileMenu, @"Recover", "MENU:TOPBAR_MT_file_recover");
+        cocoa_native_menu_item(
+            recoverMenu, @"Last Session", [NSApp delegate], "OP:WM_OT_recover_last_session", @"", 0);
+        cocoa_native_menu_item(
+            recoverMenu, @"Auto Save...", [NSApp delegate], "OP:WM_OT_recover_auto_save", @"", 0);
+        [fileMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(fileMenu, @"Save", [NSApp delegate], "CMD:SAVE", @"s", NSEventModifierFlagCommand);
+        cocoa_native_menu_item(fileMenu,
+                               @"Save As...",
+                               [NSApp delegate],
+                               "CMD:SAVE_AS",
+                               @"S",
+                               NSEventModifierFlagShift | NSEventModifierFlagCommand);
+        cocoa_native_menu_item(fileMenu, @"Save Copy...", [NSApp delegate], "CMD:SAVE_COPY", @"", 0);
+        cocoa_native_menu_item(fileMenu, @"Save Incremental", [NSApp delegate], "CMD:SAVE_INCREMENTAL", @"", 0);
+        [fileMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(fileMenu, @"Link...", [NSApp delegate], "OP:WM_OT_link", @"", 0);
+        cocoa_native_menu_item(fileMenu, @"Append...", [NSApp delegate], "OP:WM_OT_append", @"", 0);
+        NSMenu *previewMenu = cocoa_native_submenu_item(
+            fileMenu, @"Data Previews", "MENU:TOPBAR_MT_file_previews");
+        cocoa_native_menu_item(
+            previewMenu, @"Ensure Data-Block Previews", [NSApp delegate], "OP:WM_OT_previews_ensure", @"", 0);
+        cocoa_native_menu_item(previewMenu,
+                               @"Batch-Generate Previews...",
+                               [NSApp delegate],
+                               "OP:WM_OT_previews_batch_generate",
+                               @"",
+                               0);
+        [previewMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(
+            previewMenu, @"Clear Data-Block Previews...", [NSApp delegate], "OP:WM_OT_previews_clear", @"", 0);
+        cocoa_native_menu_item(previewMenu,
+                               @"Batch-Clear Previews...",
+                               [NSApp delegate],
+                               "OP:WM_OT_previews_batch_clear",
+                               @"",
+                               0);
+        [fileMenu addItem:[NSMenuItem separatorItem]];
+        NSMenu *importMenu = cocoa_native_submenu_item(fileMenu, @"Import", "MENU:TOPBAR_MT_file_import");
+        cocoa_native_menu_item(importMenu, @"Alembic (.abc)", [NSApp delegate], "OP:WM_OT_alembic_import", @"", 0);
+        cocoa_native_menu_item(importMenu,
+                               @"Universal Scene Description (.usd*)",
+                               [NSApp delegate],
+                               "OP:WM_OT_usd_import",
+                               @"",
+                               0);
+        cocoa_native_menu_item(importMenu, @"SVG as Grease Pencil", [NSApp delegate], "OP:WM_OT_grease_pencil_import_svg", @"", 0);
+        cocoa_native_menu_item(importMenu, @"Wavefront (.obj)", [NSApp delegate], "OP:WM_OT_obj_import", @"", 0);
+        cocoa_native_menu_item(importMenu, @"Stanford PLY (.ply)", [NSApp delegate], "OP:WM_OT_ply_import", @"", 0);
+        cocoa_native_menu_item(importMenu, @"STL (.stl)", [NSApp delegate], "OP:WM_OT_stl_import", @"", 0);
+        cocoa_native_menu_item(
+            importMenu, @"FBX (.fbx) (experimental)", [NSApp delegate], "OP:WM_OT_fbx_import", @"", 0);
+        cocoa_native_menu_item(
+            importMenu, @"Collada (.dae) (Legacy)", [NSApp delegate], "OP:WM_OT_collada_import", @"", 0);
+        cocoa_native_menu_item(
+            importMenu, @"Motion Capture (.bvh)", [NSApp delegate], "OP:IMPORT_ANIM_OT_bvh", @"", 0);
+        cocoa_native_menu_item(importMenu,
+                               @"Scalable Vector Graphics (.svg)",
+                               [NSApp delegate],
+                               "OP:IMPORT_CURVE_OT_svg",
+                               @"",
+                               0);
+        cocoa_native_menu_item(importMenu, @"FBX (.fbx)", [NSApp delegate], "OP:IMPORT_SCENE_OT_fbx", @"", 0);
+        cocoa_native_menu_item(
+            importMenu, @"glTF 2.0 (.glb/.gltf)", [NSApp delegate], "OP:IMPORT_SCENE_OT_gltf", @"", 0);
+        NSMenu *exportMenu = cocoa_native_submenu_item(fileMenu, @"Export", "MENU:TOPBAR_MT_file_export");
+        cocoa_native_menu_item(exportMenu, @"Alembic (.abc)", [NSApp delegate], "OP:WM_OT_alembic_export", @"", 0);
+        cocoa_native_menu_item(exportMenu,
+                               @"Universal Scene Description (.usd*)",
+                               [NSApp delegate],
+                               "OP:WM_OT_usd_export",
+                               @"",
+                               0);
+        cocoa_native_menu_item(exportMenu, @"Grease Pencil as SVG", [NSApp delegate], "OP:WM_OT_grease_pencil_export_svg", @"", 0);
+        cocoa_native_menu_item(exportMenu, @"Grease Pencil as PDF", [NSApp delegate], "OP:WM_OT_grease_pencil_export_pdf", @"", 0);
+        cocoa_native_menu_item(exportMenu, @"Wavefront (.obj)", [NSApp delegate], "OP:WM_OT_obj_export", @"", 0);
+        cocoa_native_menu_item(exportMenu, @"Stanford PLY (.ply)", [NSApp delegate], "OP:WM_OT_ply_export", @"", 0);
+        cocoa_native_menu_item(exportMenu, @"STL (.stl)", [NSApp delegate], "OP:WM_OT_stl_export", @"", 0);
+        cocoa_native_menu_item(
+            exportMenu, @"Collada (.dae) (Legacy)", [NSApp delegate], "OP:WM_OT_collada_export", @"", 0);
+        cocoa_native_menu_item(
+            exportMenu, @"Motion Capture (.bvh)", [NSApp delegate], "OP:EXPORT_ANIM_OT_bvh", @"", 0);
+        cocoa_native_menu_item(exportMenu, @"FBX (.fbx)", [NSApp delegate], "OP:EXPORT_SCENE_OT_fbx", @"", 0);
+        cocoa_native_menu_item(
+            exportMenu, @"glTF 2.0 (.glb/.gltf)", [NSApp delegate], "OP:EXPORT_SCENE_OT_gltf", @"", 0);
+        cocoa_native_menu_item(
+            fileMenu, @"Export All Collections", [NSApp delegate], "OP:WM_OT_collection_export_all", @"", 0);
+        [fileMenu addItem:[NSMenuItem separatorItem]];
+        NSMenu *externalDataMenu = cocoa_native_submenu_item(
+            fileMenu, @"External Data", "MENU:TOPBAR_MT_file_external_data");
+        cocoa_native_menu_item(externalDataMenu,
+                               @"Automatically Pack Resources",
+                               [NSApp delegate],
+                               "OP:FILE_OT_autopack_toggle",
+                               @"",
+                               0);
+        cocoa_native_menu_item(externalDataMenu, @"Pack Resources", [NSApp delegate], "OP:FILE_OT_pack_all", @"", 0);
+        cocoa_native_menu_item(externalDataMenu, @"Unpack Resources", [NSApp delegate], "OP:FILE_OT_unpack_all", @"", 0);
+        [externalDataMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(externalDataMenu, @"Pack Linked Libraries", [NSApp delegate], "OP:FILE_OT_pack_libraries", @"", 0);
+        cocoa_native_menu_item(externalDataMenu, @"Unpack Linked Libraries", [NSApp delegate], "OP:FILE_OT_unpack_libraries", @"", 0);
+        [externalDataMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(externalDataMenu, @"Make Paths Relative", [NSApp delegate], "OP:FILE_OT_make_paths_relative", @"", 0);
+        cocoa_native_menu_item(externalDataMenu, @"Make Paths Absolute", [NSApp delegate], "OP:FILE_OT_make_paths_absolute", @"", 0);
+        [externalDataMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(externalDataMenu, @"Report Missing Files", [NSApp delegate], "OP:FILE_OT_report_missing_files", @"", 0);
+        cocoa_native_menu_item(externalDataMenu, @"Find Missing Files...", [NSApp delegate], "OP:FILE_OT_find_missing_files", @"", 0);
+        NSMenu *cleanupMenu = cocoa_native_submenu_item(fileMenu, @"Clean Up", "MENU:TOPBAR_MT_file_cleanup");
+        cocoa_native_menu_item(cleanupMenu, @"Purge Unused Data...", [NSApp delegate], "OP:OUTLINER_OT_orphans_purge", @"", 0);
+        cocoa_native_menu_item(cleanupMenu, @"Manage Unused Data...", [NSApp delegate], "OP:OUTLINER_OT_orphans_manage", @"", 0);
+        [fileMenu addItem:[NSMenuItem separatorItem]];
+        NSMenu *defaultsMenu = cocoa_native_submenu_item(fileMenu, @"Defaults", "MENU:TOPBAR_MT_file_defaults");
+        cocoa_native_menu_item(defaultsMenu, @"Save Startup File", [NSApp delegate], "OP:WM_OT_save_homefile", @"", 0);
+        cocoa_native_menu_item(defaultsMenu, @"Load Factory Settings", [NSApp delegate], "OP:WM_OT_read_factory_settings", @"", 0);
+
+        menuItem = [[NSMenuItem alloc] init];
+        menuItem.submenu = fileMenu;
+        menuItem.representedObject = @"MENU:TOPBAR_MT_file";
+        [mainMenubar addItem:menuItem];
+        [menuItem release];
+        [fileMenu release];
+
+        /* Create the edit menu. */
+        editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+        cocoa_native_menu_item(editMenu, @"Undo", [NSApp delegate], "OP:ED_OT_undo", @"z", NSEventModifierFlagCommand);
+        cocoa_native_menu_item(editMenu,
+                               @"Redo",
+                               [NSApp delegate],
+                               "OP:ED_OT_redo",
+                               @"Z",
+                               NSEventModifierFlagShift | NSEventModifierFlagCommand);
+        cocoa_native_menu_item(editMenu, @"Undo History", [NSApp delegate], "MENU:TOPBAR_MT_undo_history", @"", 0);
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(editMenu, @"Adjust Last Operation...", [NSApp delegate], "OP:SCREEN_OT_redo_last", @"", 0);
+        cocoa_native_menu_item(editMenu, @"Repeat Last", [NSApp delegate], "OP:SCREEN_OT_repeat_last", @"", 0);
+        cocoa_native_menu_item(editMenu, @"Repeat History...", [NSApp delegate], "OP:SCREEN_OT_repeat_history", @"", 0);
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(editMenu, @"Menu Search...", [NSApp delegate], "OP:WM_OT_search_menu", @"", 0);
+        cocoa_native_menu_item(editMenu, @"Operator Search...", [NSApp delegate], "OP:WM_OT_search_operator", @"", 0);
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(editMenu, @"Rename Active Item...", [NSApp delegate], "CMD:RENAME_ACTIVE_ITEM", @"", 0);
+        cocoa_native_menu_item(editMenu, @"Batch Rename...", [NSApp delegate], "OP:WM_OT_batch_rename", @"", 0);
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(editMenu, @"Lock Object Modes", [NSApp delegate], "CMD:LOCK_OBJECT_MODE", @"", 0);
+
+        menuItem = [[NSMenuItem alloc] init];
+        menuItem.submenu = editMenu;
+        menuItem.representedObject = @"MENU:TOPBAR_MT_edit";
+        [mainMenubar addItem:menuItem];
+        [menuItem release];
+        [editMenu release];
+
+        /* Create the render menu. */
+        renderMenu = [[NSMenu alloc] initWithTitle:@"Render"];
+        cocoa_native_menu_item(renderMenu, @"Render Image", [NSApp delegate], "CMD:RENDER_IMAGE", @"", 0);
+        cocoa_native_menu_item(renderMenu, @"Render Animation", [NSApp delegate], "CMD:RENDER_ANIMATION", @"", 0);
+        [renderMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(renderMenu, @"Render Audio...", [NSApp delegate], "OP:SOUND_OT_mixdown", @"", 0);
+        [renderMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(renderMenu, @"View Render", [NSApp delegate], "OP:RENDER_OT_view_show", @"", 0);
+        cocoa_native_menu_item(renderMenu, @"View Animation", [NSApp delegate], "OP:RENDER_OT_play_rendered_anim", @"", 0);
+        [renderMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(renderMenu, @"Lock Interface", [NSApp delegate], "CMD:LOCK_INTERFACE", @"", 0);
+
+        menuItem = [[NSMenuItem alloc] init];
+        menuItem.submenu = renderMenu;
+        menuItem.representedObject = @"MENU:TOPBAR_MT_render";
+        [mainMenubar addItem:menuItem];
+        [menuItem release];
+        [renderMenu release];
+
         /* Create the window menu. */
         windowMenu = [[NSMenu alloc] initWithTitle:@"Window"];
+
+        cocoa_native_menu_item(windowMenu, @"New Window", [NSApp delegate], "OP:WM_OT_window_new", @"", 0);
+        cocoa_native_menu_item(windowMenu, @"New Main Window", [NSApp delegate], "OP:WM_OT_window_new_main", @"", 0);
+        [windowMenu addItem:[NSMenuItem separatorItem]];
 
         menuItem = [windowMenu addItemWithTitle:@"Minimize"
                                          action:@selector(performMiniaturize:)
@@ -642,6 +989,18 @@ GHOST_TSuccess GHOST_SystemCocoa::init()
         menuItem.keyEquivalentModifierMask = NSEventModifierFlagControl |
                                              NSEventModifierFlagCommand;
 
+        cocoa_native_menu_item(
+            windowMenu, @"Toggle Fullscreen", [NSApp delegate], "OP:WM_OT_window_fullscreen_toggle", @"", 0);
+        [windowMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(windowMenu, @"Next Workspace", [NSApp delegate], "CMD:NEXT_WORKSPACE", @"", 0);
+        cocoa_native_menu_item(windowMenu, @"Previous Workspace", [NSApp delegate], "CMD:PREVIOUS_WORKSPACE", @"", 0);
+        [windowMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(windowMenu, @"Show Status Bar", [NSApp delegate], "CMD:SHOW_STATUSBAR", @"", 0);
+        [windowMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(windowMenu, @"Save Screenshot...", [NSApp delegate], "OP:SCREEN_OT_screenshot", @"", 0);
+        cocoa_native_menu_item(
+            windowMenu, @"Save Screenshot (Editor)...", [NSApp delegate], "OP:SCREEN_OT_screenshot_area", @"", 0);
+
         menuItem = [windowMenu addItemWithTitle:@"Close"
                                          action:@selector(performClose:)
                                   keyEquivalent:@"w"];
@@ -649,18 +1008,41 @@ GHOST_TSuccess GHOST_SystemCocoa::init()
 
         menuItem = [[NSMenuItem alloc] init];
         menuItem.submenu = windowMenu;
+        menuItem.representedObject = @"MENU:TOPBAR_MT_window";
 
         [mainMenubar addItem:menuItem];
         [menuItem release];
 
+        /* Create the help menu. */
+        helpMenu = [[NSMenu alloc] initWithTitle:@"Help"];
+        cocoa_native_menu_item(helpMenu, @"Manual", [NSApp delegate], "CMD:HELP_MANUAL", @"", 0);
+        cocoa_native_menu_item(helpMenu, @"Support", [NSApp delegate], "CMD:HELP_SUPPORT", @"", 0);
+        cocoa_native_menu_item(helpMenu, @"User Communities", [NSApp delegate], "CMD:HELP_COMMUNITY", @"", 0);
+        cocoa_native_menu_item(helpMenu, @"Get Involved", [NSApp delegate], "CMD:HELP_GET_INVOLVED", @"", 0);
+        cocoa_native_menu_item(helpMenu, @"Release Notes", [NSApp delegate], "CMD:HELP_RELEASE_NOTES", @"", 0);
+        [helpMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(
+            helpMenu, @"Developer Documentation", [NSApp delegate], "CMD:HELP_DEVELOPER_DOCS", @"", 0);
+        cocoa_native_menu_item(
+            helpMenu, @"Developer Community", [NSApp delegate], "CMD:HELP_DEVELOPER_COMMUNITY", @"", 0);
+        cocoa_native_menu_item(
+            helpMenu, @"Python API Reference", [NSApp delegate], "CMD:HELP_PYTHON_API", @"", 0);
+        cocoa_native_menu_item(
+            helpMenu, @"Operator Cheat Sheet", [NSApp delegate], "OP:WM_OT_operator_cheat_sheet", @"", 0);
+        [helpMenu addItem:[NSMenuItem separatorItem]];
+        cocoa_native_menu_item(helpMenu, @"Report a Bug", [NSApp delegate], "CMD:HELP_REPORT_BUG", @"", 0);
+        cocoa_native_menu_item(helpMenu, @"Save System Info", [NSApp delegate], "OP:WM_OT_sysinfo", @"", 0);
+
+        menuItem = [[NSMenuItem alloc] init];
+        menuItem.submenu = helpMenu;
+        menuItem.representedObject = @"MENU:TOPBAR_MT_help";
+        [mainMenubar addItem:menuItem];
+        [menuItem release];
+        [helpMenu release];
+
         [NSApp setMainMenu:mainMenubar];
         [NSApp setWindowsMenu:windowMenu];
         [windowMenu release];
-      }
-
-      if ([NSApp delegate] == nil) {
-        CocoaAppDelegate *appDelegate = [[CocoaAppDelegate alloc] initWithSystemCocoa:this];
-        [NSApp setDelegate:appDelegate];
       }
 
       /* AppKit provides automatic window tabbing. Blender is a single-tabbed
@@ -1445,6 +1827,123 @@ bool GHOST_SystemCocoa::handleOpenDocumentRequest(void *filepathStr)
                                     static_cast<GHOST_TEventDataPtr>(temp_buff)));
   }
   return YES;
+}
+
+void GHOST_SystemCocoa::handleNativeMenuCommand(const char *command)
+{
+  GHOST_Window *window = (GHOST_Window *)m_windowManager->getActiveWindow();
+  if (!window && !m_windowManager->getWindows().empty()) {
+    window = (GHOST_Window *)m_windowManager->getWindows().front();
+  }
+
+  if (!window || !command || command[0] == '\0') {
+    return;
+  }
+
+  if (window->getCursorGrabModeIsWarp()) {
+    return;
+  }
+
+  const size_t command_size = strlen(command) + 1;
+  char *command_copy = (char *)malloc(command_size);
+  memcpy(command_copy, command, command_size);
+
+  pushEvent(new GHOST_EventString(getMilliSeconds(),
+                                  GHOST_kEventNativeMenuCommand,
+                                  window,
+                                  static_cast<GHOST_TEventDataPtr>(command_copy)));
+
+  m_outsideLoopEventProcessed = true;
+}
+
+GHOST_TSuccess GHOST_SystemCocoa::updateNativeMenu(const GHOST_TNativeMenuItem *items,
+                                                   const size_t items_num)
+{
+  if (items == nullptr || items_num == 0) {
+    return GHOST_kFailure;
+  }
+
+  @autoreleasepool {
+    NSMenu *mainMenu = [[NSMenu alloc] init];
+    NSMenu *menuStack[32] = {};
+    NSMenu *appMenu = nil;
+    bool appMenuStandardItemsAdded = false;
+
+    for (size_t i = 0; i < items_num; i++) {
+      const GHOST_TNativeMenuItem &native_item = items[i];
+      if (native_item.depth < 0 || native_item.depth >= 32) {
+        continue;
+      }
+
+      NSMenu *parentMenu = native_item.depth == 0 ? mainMenu : menuStack[native_item.depth - 1];
+      if (parentMenu == nil) {
+        continue;
+      }
+
+      if (native_item.type == GHOST_kNativeMenuItemSeparator) {
+        if ([parentMenu numberOfItems] > 0) {
+          [parentMenu addItem:[NSMenuItem separatorItem]];
+        }
+        continue;
+      }
+
+      NSString *title = cocoa_native_menu_string(native_item.title);
+
+      if (native_item.type == GHOST_kNativeMenuItemSubmenu) {
+        if (native_item.depth == 0 && appMenu != nil && !appMenuStandardItemsAdded) {
+          cocoa_native_menu_add_standard_app_items(appMenu);
+          appMenuStandardItemsAdded = true;
+        }
+
+        NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+        NSMenu *submenu = [[NSMenu alloc] initWithTitle:title];
+        menuItem.submenu = submenu;
+        if (native_item.identifier != nullptr) {
+          menuItem.representedObject = cocoa_native_menu_string(native_item.identifier);
+        }
+        [parentMenu addItem:menuItem];
+        menuStack[native_item.depth] = submenu;
+
+        if (native_item.depth == 0) {
+          if (appMenu == nil) {
+            appMenu = submenu;
+          }
+          if (native_item.identifier != nullptr &&
+              strcmp(native_item.identifier, "MENU:TOPBAR_MT_window") == 0)
+          {
+            [NSApp setWindowsMenu:submenu];
+          }
+        }
+
+        [submenu release];
+        [menuItem release];
+        continue;
+      }
+
+      if (native_item.type == GHOST_kNativeMenuItemCommand) {
+        NSMenuItem *menuItem = [[NSMenuItem alloc]
+            initWithTitle:title
+                   action:@selector(nativeBlenderMenuCommand:)
+            keyEquivalent:cocoa_native_menu_string(native_item.key_equivalent)];
+        menuItem.target = [NSApp delegate];
+        menuItem.representedObject = cocoa_native_menu_string(native_item.command);
+        menuItem.keyEquivalentModifierMask = cocoa_native_menu_modifier_mask(
+            native_item.key_modifiers);
+        menuItem.enabled = native_item.enabled != 0;
+        [parentMenu addItem:menuItem];
+        [menuItem release];
+      }
+    }
+
+    if (appMenu != nil && !appMenuStandardItemsAdded) {
+      cocoa_native_menu_add_standard_app_items(appMenu);
+    }
+
+    [NSApp setMainMenu:mainMenu];
+    [mainMenu release];
+  }
+
+  return GHOST_kSuccess;
 }
 
 GHOST_TSuccess GHOST_SystemCocoa::handleTabletEvent(void *eventPtr, short eventType)

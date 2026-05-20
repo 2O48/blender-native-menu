@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 
 #include <fmt/format.h>
@@ -22,6 +23,7 @@
 
 #include "DNA_listBase.h"
 #include "DNA_screen_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
@@ -38,6 +40,7 @@
 #include "BLI_system.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -61,6 +64,7 @@
 #include "wm.hh"
 #include "wm_draw.hh"
 #include "wm_event_system.hh"
+#include "wm_event_types.hh"
 #include "wm_files.hh"
 #include "wm_window.hh"
 #include "wm_window_private.hh"
@@ -79,6 +83,7 @@
 
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
 
 #include "BLF_api.hh"
 #include "GPU_context.hh"
@@ -86,6 +91,10 @@
 #include "GPU_init_exit.hh"
 
 #include "UI_resources.hh"
+
+#ifdef WITH_PYTHON
+#  include "BPY_extern_run.hh"
+#endif
 
 /* For assert. */
 #ifndef NDEBUG
@@ -97,6 +106,257 @@ static GHOST_SystemHandle g_system = nullptr;
 #if !(defined(WIN32) || defined(__APPLE__))
 static const char *g_system_backend_id = nullptr;
 #endif
+
+static void wm_native_menu_set_bool_if_exists(PointerRNA *ptr, const char *prop_name, const bool value)
+{
+  if (RNA_struct_find_property(ptr, prop_name) != nullptr) {
+    RNA_boolean_set(ptr, prop_name, value);
+  }
+}
+
+static void wm_native_menu_set_string_if_exists(PointerRNA *ptr,
+                                                const char *prop_name,
+                                                const char *value)
+{
+  if (RNA_struct_find_property(ptr, prop_name) != nullptr) {
+    RNA_string_set(ptr, prop_name, value);
+  }
+}
+
+static void wm_native_menu_set_enum_if_exists(PointerRNA *ptr,
+                                              const char *prop_name,
+                                              const char *value)
+{
+  if (RNA_struct_find_property(ptr, prop_name) != nullptr) {
+    RNA_enum_set_identifier(nullptr, ptr, prop_name, value);
+  }
+}
+
+static PointerRNA wm_native_menu_operator_properties_create(wmOperatorType *ot)
+{
+  PointerRNA props{};
+  WM_operator_properties_create_ptr(&props, ot);
+  return props;
+}
+
+static void wm_native_menu_update_items(bContext *C, wmWindow *win)
+{
+#ifdef __APPLE__
+  if (g_system == nullptr) {
+    return;
+  }
+
+  wmWindow *prev_win = CTX_wm_window(C);
+  CTX_wm_window_set(C, win);
+
+  MenuType *editor_menus = WM_menutype_find("TOPBAR_MT_editor_menus", true);
+  blender::Vector<UINativeMenuItem> ui_items;
+  UI_menutype_native_items_collect(C, editor_menus, ui_items, 0);
+
+  static std::string last_signature;
+  std::string signature;
+  for (UINativeMenuItem &item : ui_items) {
+    if (item.identifier == "MENU:TOPBAR_MT_blender") {
+      item.title = "Blender";
+    }
+    signature += std::to_string(item.type) + "\t" + std::to_string(item.depth) + "\t" +
+                 item.identifier + "\t" + item.title + "\t" + item.command + "\t" +
+                 item.key_equivalent + "\t" + std::to_string(item.key_modifiers) + "\t" +
+                 std::to_string(item.enabled) + "\n";
+  }
+
+  if (signature == last_signature) {
+    CTX_wm_window_set(C, prev_win);
+    return;
+  }
+  last_signature = signature;
+
+  blender::Vector<GHOST_TNativeMenuItem> native_items;
+  native_items.reserve(ui_items.size());
+
+  for (const UINativeMenuItem &item : ui_items) {
+    native_items.append({int(item.type),
+                         item.depth,
+                         item.identifier.c_str(),
+                         item.title.c_str(),
+                         item.command.c_str(),
+                         item.key_equivalent.c_str(),
+                         item.key_modifiers,
+                         item.enabled});
+  }
+
+  if (!native_items.is_empty()) {
+    GHOST_UpdateNativeMenu(g_system, native_items.data(), native_items.size());
+  }
+  CTX_wm_window_set(C, prev_win);
+#else
+  UNUSED_VARS(C, win);
+#endif
+}
+
+static wmOperatorStatus wm_native_menu_call_operator(bContext *C,
+                                                     const char *opstring,
+                                                     wmOperatorCallContext context,
+                                                     PointerRNA *properties = nullptr)
+{
+  wmOperatorType *ot = WM_operatortype_find(opstring, false);
+  if (!ot) {
+    CLOG_WARN(WM_LOG_EVENTS, "Native menu operator not found: %s", opstring);
+    return wmOperatorStatus(0);
+  }
+  return WM_operator_name_call_ptr(C, ot, context, properties, nullptr);
+}
+
+static void wm_native_menu_exec_command(bContext *C, wmWindowManager *wm, wmWindow *win, const char *command)
+{
+  if (command == nullptr || command[0] == '\0') {
+    return;
+  }
+
+  CTX_wm_window_set(C, win);
+
+  if (STRPREFIX(command, "OP:")) {
+    wm_native_menu_call_operator(C, command + 3, WM_OP_INVOKE_DEFAULT);
+  }
+  else if (STRPREFIX(command, "PYOP:")) {
+#ifdef WITH_PYTHON
+    const char *imports[] = {"bpy", nullptr};
+    BPY_run_string_exec(C, imports, command + 5);
+#else
+    CLOG_WARN(WM_LOG_EVENTS, "Native menu Python command requires WITH_PYTHON: %s", command);
+#endif
+  }
+  else if (STRPREFIX(command, "MENU:")) {
+    WM_menu_name_call(C, command + 5, WM_OP_INVOKE_DEFAULT);
+  }
+  else if (STREQ(command, "CMD:SAVE") || STREQ(command, "CMD:SAVE_INCREMENTAL")) {
+    wmOperatorType *ot = WM_operatortype_find("WM_OT_save_mainfile", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_bool_if_exists(&props, "show_save_modified_images_dialog", true);
+    if (STREQ(command, "CMD:SAVE_INCREMENTAL")) {
+      wm_native_menu_set_bool_if_exists(&props, "incremental", true);
+    }
+    wm_native_menu_call_operator(C,
+                                 "WM_OT_save_mainfile",
+                                 STREQ(command, "CMD:SAVE_INCREMENTAL") ? WM_OP_EXEC_DEFAULT :
+                                                                          WM_OP_INVOKE_DEFAULT,
+                                 &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STR_ELEM(command, "CMD:SAVE_AS", "CMD:SAVE_COPY")) {
+    wmOperatorType *ot = WM_operatortype_find("WM_OT_save_as_mainfile", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_bool_if_exists(&props, "show_save_modified_images_dialog", true);
+    if (STREQ(command, "CMD:SAVE_COPY")) {
+      wm_native_menu_set_bool_if_exists(&props, "copy", true);
+    }
+    wm_native_menu_call_operator(C, "WM_OT_save_as_mainfile", WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STRPREFIX(command, "CMD:READ_HOMEFILE_TEMPLATE:")) {
+    wmOperatorType *ot = WM_operatortype_find("WM_OT_read_homefile", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_string_if_exists(&props, "app_template", command + 27);
+    wm_native_menu_call_operator(C, "WM_OT_read_homefile", WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STR_ELEM(command, "CMD:RENDER_IMAGE", "CMD:RENDER_ANIMATION")) {
+    wmOperatorType *ot = WM_operatortype_find("RENDER_OT_render", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_bool_if_exists(&props, "use_viewport", true);
+    if (STREQ(command, "CMD:RENDER_ANIMATION")) {
+      wm_native_menu_set_bool_if_exists(&props, "animation", true);
+    }
+    wm_native_menu_call_operator(C, "RENDER_OT_render", WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STREQ(command, "CMD:RENAME_ACTIVE_ITEM")) {
+    wmOperatorType *ot = WM_operatortype_find("WM_OT_call_panel", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_string_if_exists(&props, "name", "TOPBAR_PT_name");
+    wm_native_menu_set_bool_if_exists(&props, "keep_open", false);
+    wm_native_menu_call_operator(C, "WM_OT_call_panel", WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STR_ELEM(command, "CMD:NEXT_WORKSPACE", "CMD:PREVIOUS_WORKSPACE")) {
+    wmOperatorType *ot = WM_operatortype_find("SCREEN_OT_workspace_cycle", false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    wm_native_menu_set_enum_if_exists(
+        &props, "direction", STREQ(command, "CMD:NEXT_WORKSPACE") ? "NEXT" : "PREV");
+    wm_native_menu_call_operator(C, "SCREEN_OT_workspace_cycle", WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+  else if (STREQ(command, "CMD:LOCK_OBJECT_MODE")) {
+    ToolSettings *tool_settings = CTX_data_tool_settings(C);
+    if (tool_settings) {
+      tool_settings->object_flag ^= SCE_OBJECT_MODE_LOCK;
+      WM_event_add_notifier_ex(wm, win, NC_SCENE | ND_TOOLSETTINGS, CTX_data_scene(C));
+    }
+  }
+  else if (STREQ(command, "CMD:LOCK_INTERFACE")) {
+    Scene *scene = CTX_data_scene(C);
+    if (scene) {
+      scene->r.use_lock_interface = !scene->r.use_lock_interface;
+      WM_event_add_notifier_ex(wm, win, NC_SCENE | ND_RENDER_OPTIONS, scene);
+    }
+  }
+  else if (STREQ(command, "CMD:SHOW_STATUSBAR")) {
+    bScreen *screen = CTX_wm_screen(C);
+    if (screen) {
+      screen->flag ^= SCREEN_COLLAPSE_STATUSBAR;
+      WM_event_add_notifier_ex(wm, win, NC_SCREEN | NA_EDITED, screen);
+    }
+  }
+  else if (STRPREFIX(command, "CMD:HELP_")) {
+    const char *opstring = "WM_OT_url_open";
+    const char *preset = nullptr;
+    const char *url = nullptr;
+    if (STREQ(command, "CMD:HELP_MANUAL")) {
+      opstring = "WM_OT_url_open_preset";
+      preset = "MANUAL";
+    }
+    else if (STREQ(command, "CMD:HELP_RELEASE_NOTES")) {
+      opstring = "WM_OT_url_open_preset";
+      preset = "RELEASE_NOTES";
+    }
+    else if (STREQ(command, "CMD:HELP_PYTHON_API")) {
+      opstring = "WM_OT_url_open_preset";
+      preset = "API";
+    }
+    else if (STREQ(command, "CMD:HELP_REPORT_BUG")) {
+      opstring = "WM_OT_url_open_preset";
+      preset = "BUG";
+    }
+    else if (STREQ(command, "CMD:HELP_SUPPORT")) {
+      url = "https://www.blender.org/support";
+    }
+    else if (STREQ(command, "CMD:HELP_COMMUNITY")) {
+      url = "https://www.blender.org/community/";
+    }
+    else if (STREQ(command, "CMD:HELP_GET_INVOLVED")) {
+      url = "https://www.blender.org/get-involved/";
+    }
+    else if (STREQ(command, "CMD:HELP_DEVELOPER_DOCS")) {
+      url = "https://developer.blender.org/docs/";
+    }
+    else if (STREQ(command, "CMD:HELP_DEVELOPER_COMMUNITY")) {
+      url = "https://devtalk.blender.org";
+    }
+
+    wmOperatorType *ot = WM_operatortype_find(opstring, false);
+    PointerRNA props = wm_native_menu_operator_properties_create(ot);
+    if (preset) {
+      wm_native_menu_set_enum_if_exists(&props, "type", preset);
+    }
+    if (url) {
+      wm_native_menu_set_string_if_exists(&props, "url", url);
+    }
+    wm_native_menu_call_operator(C, opstring, WM_OP_INVOKE_DEFAULT, &props);
+    WM_operator_properties_free(&props);
+  }
+
+  CTX_wm_window_set(C, nullptr);
+}
 
 enum eWinOverrideFlag {
   WIN_OVERRIDE_GEOM = (1 << 0),
@@ -1555,6 +1815,7 @@ static bool ghost_event_proc(GHOST_EventHandle ghost_event, GHOST_TUserDataPtr C
   }
 
   wmWindow *win = static_cast<wmWindow *>(GHOST_GetWindowUserData(ghostwin));
+  wm_native_menu_update_items(C, win);
 
   switch (type) {
     case GHOST_kEventWindowDeactivate: {
@@ -1729,6 +1990,11 @@ static bool ghost_event_proc(GHOST_EventHandle ghost_event, GHOST_TUserDataPtr C
 
         CTX_wm_window_set(C, nullptr);
       }
+      break;
+    }
+    case GHOST_kEventNativeMenuCommand: {
+      const char *command = static_cast<const char *>(data);
+      wm_native_menu_exec_command(C, wm, win, command);
       break;
     }
     case GHOST_kEventDraggingDropDone: {

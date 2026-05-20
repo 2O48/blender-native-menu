@@ -65,6 +65,13 @@ extern void GHOST_ShowMessageBox(GHOST_SystemHandle systemhandle,
                                  GHOST_DialogOptions dialog_options);
 
 /**
+ * Update native platform menu item labels and shortcuts.
+ */
+extern GHOST_TSuccess GHOST_UpdateNativeMenu(GHOST_SystemHandle systemhandle,
+                                             const GHOST_TNativeMenuItem *items,
+                                             size_t items_num);
+
+/**
  * Creates an event consumer object
  * \param eventCallback: The event callback routine.
  * \param user_data: Pointer to user data returned to the callback routine.

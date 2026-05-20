@@ -5,6 +5,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
@@ -456,6 +457,36 @@ void uiLayoutSetTooltipFunc(uiLayout *layout,
                             uiFreeArgFunc free_arg);
 
 void UI_menutype_draw(bContext *C, MenuType *mt, uiLayout *layout);
+
+enum eUINativeMenuItemType {
+  UI_NATIVE_MENU_ITEM_SEPARATOR = 0,
+  UI_NATIVE_MENU_ITEM_SUBMENU = 1,
+  UI_NATIVE_MENU_ITEM_COMMAND = 2,
+};
+
+enum eUINativeMenuKeyModifier {
+  UI_NATIVE_MENU_KEY_MODIFIER_NONE = 0,
+  UI_NATIVE_MENU_KEY_MODIFIER_SHIFT = (1 << 0),
+  UI_NATIVE_MENU_KEY_MODIFIER_CONTROL = (1 << 1),
+  UI_NATIVE_MENU_KEY_MODIFIER_ALT = (1 << 2),
+  UI_NATIVE_MENU_KEY_MODIFIER_OS = (1 << 3),
+};
+
+struct UINativeMenuItem {
+  eUINativeMenuItemType type;
+  int depth;
+  std::string identifier;
+  std::string title;
+  std::string command;
+  std::string key_equivalent;
+  int key_modifiers;
+  bool enabled;
+};
+
+void UI_menutype_native_items_collect(bContext *C,
+                                      MenuType *mt,
+                                      blender::Vector<UINativeMenuItem> &items,
+                                      int depth);
 
 /**
  * Used for popup panels only.
