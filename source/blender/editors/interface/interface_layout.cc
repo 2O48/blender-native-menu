@@ -23,6 +23,7 @@
 #include "BLI_math_base.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rect.h"
+#include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
 
@@ -43,6 +44,7 @@
 #include "ED_id_management.hh"
 
 #include "WM_api.hh"
+#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "interface_intern.hh"
@@ -5896,6 +5898,329 @@ void menutype_draw(bContext *C, MenuType *mt, Layout *layout)
   mt->draw(C, &menu);
 
   CTX_store_set(C, previous_context_store);
+}
+
+static std::string ui_native_menu_key_equivalent_from_event_type(const short type)
+{
+  char utf8_buf[8] = {'\0'};
+  uint unicode = 0;
+
+  if (type >= EVT_AKEY && type <= EVT_ZKEY) {
+    return std::string(1, char(type));
+  }
+  if (type >= EVT_ZEROKEY && type <= EVT_NINEKEY) {
+    return std::string(1, char(type));
+  }
+  if (type >= EVT_F1KEY && type <= EVT_F24KEY) {
+    unicode = 0xf704 + uint(type - EVT_F1KEY);
+  }
+  else {
+    switch (type) {
+      case EVT_TABKEY:
+        return "\t";
+      case EVT_RETKEY:
+        return "\r";
+      case EVT_SPACEKEY:
+        return " ";
+      case EVT_BACKSPACEKEY:
+        return "\b";
+      case EVT_ESCKEY:
+        return "\033";
+      case EVT_LEFTARROWKEY:
+        unicode = 0xf702;
+        break;
+      case EVT_DOWNARROWKEY:
+        unicode = 0xf701;
+        break;
+      case EVT_RIGHTARROWKEY:
+        unicode = 0xf703;
+        break;
+      case EVT_UPARROWKEY:
+        unicode = 0xf700;
+        break;
+      case EVT_INSERTKEY:
+        unicode = 0xf727;
+        break;
+      case EVT_DELKEY:
+        unicode = 0xf728;
+        break;
+      case EVT_HOMEKEY:
+        unicode = 0xf729;
+        break;
+      case EVT_ENDKEY:
+        unicode = 0xf72b;
+        break;
+      case EVT_PAGEUPKEY:
+        unicode = 0xf72c;
+        break;
+      case EVT_PAGEDOWNKEY:
+        unicode = 0xf72d;
+        break;
+      case EVT_PAUSEKEY:
+        unicode = 0xf730;
+        break;
+      case EVT_SEMICOLONKEY:
+        return ";";
+      case EVT_PERIODKEY:
+        return ".";
+      case EVT_COMMAKEY:
+        return ",";
+      case EVT_QUOTEKEY:
+        return "'";
+      case EVT_ACCENTGRAVEKEY:
+        return "`";
+      case EVT_MINUSKEY:
+        return "-";
+      case EVT_PLUSKEY:
+        return "+";
+      case EVT_SLASHKEY:
+        return "/";
+      case EVT_BACKSLASHKEY:
+        return "\\";
+      case EVT_EQUALKEY:
+        return "=";
+      case EVT_LEFTBRACKETKEY:
+        return "[";
+      case EVT_RIGHTBRACKETKEY:
+        return "]";
+      default:
+        return "";
+    }
+  }
+
+  BLI_str_utf8_from_unicode(unicode, utf8_buf, sizeof(utf8_buf));
+  return utf8_buf;
+}
+
+static int ui_native_menu_key_modifiers_from_item(const wmKeyMapItem *kmi)
+{
+  int modifiers = UI_NATIVE_MENU_KEY_MODIFIER_NONE;
+  if (kmi->shift == KM_MOD_HELD) {
+    modifiers |= UI_NATIVE_MENU_KEY_MODIFIER_SHIFT;
+  }
+  if (kmi->ctrl == KM_MOD_HELD) {
+    modifiers |= UI_NATIVE_MENU_KEY_MODIFIER_CONTROL;
+  }
+  if (kmi->alt == KM_MOD_HELD) {
+    modifiers |= UI_NATIVE_MENU_KEY_MODIFIER_ALT;
+  }
+  if (kmi->oskey == KM_MOD_HELD) {
+    modifiers |= UI_NATIVE_MENU_KEY_MODIFIER_OS;
+  }
+  return modifiers;
+}
+
+static void ui_native_menu_shortcut_from_button(const bContext *C,
+                                                const Button *but,
+                                                std::string &r_key_equivalent,
+                                                int &r_key_modifiers)
+{
+  if (but->optype == nullptr) {
+    return;
+  }
+
+  wmKeyMapItem *kmi = WM_key_event_operator(C,
+                                            but->optype->idname,
+                                            but->opcontext,
+                                            but->opptr && but->opptr->data ?
+                                                static_cast<IDProperty *>(but->opptr->data) :
+                                                nullptr,
+                                            EVT_TYPE_MASK_HOTKEY_INCLUDE,
+                                            EVT_TYPE_MASK_HOTKEY_EXCLUDE,
+                                            nullptr);
+  if (kmi == nullptr) {
+    return;
+  }
+
+  r_key_equivalent = ui_native_menu_key_equivalent_from_event_type(kmi->type);
+  r_key_modifiers = ui_native_menu_key_modifiers_from_item(kmi);
+}
+
+static std::string ui_native_menu_button_title(const Button *but)
+{
+  blender::StringRef title = button_drawstr_without_sep_char(but);
+  return title.is_empty() ? but->str : std::string(title.data(), title.size());
+}
+
+static const char *ui_native_menu_operator_context_id(const wm::OpCallContext context)
+{
+  switch (context) {
+    case wm::OpCallContext::InvokeDefault:
+      return "INVOKE_DEFAULT";
+    case wm::OpCallContext::InvokeRegionWin:
+      return "INVOKE_REGION_WIN";
+    case wm::OpCallContext::InvokeRegionChannels:
+      return "INVOKE_REGION_CHANNELS";
+    case wm::OpCallContext::InvokeRegionPreview:
+      return "INVOKE_REGION_PREVIEW";
+    case wm::OpCallContext::InvokeArea:
+      return "INVOKE_AREA";
+    case wm::OpCallContext::InvokeScreen:
+      return "INVOKE_SCREEN";
+    case wm::OpCallContext::ExecDefault:
+      return "EXEC_DEFAULT";
+    case wm::OpCallContext::ExecRegionWin:
+      return "EXEC_REGION_WIN";
+    case wm::OpCallContext::ExecRegionChannels:
+      return "EXEC_REGION_CHANNELS";
+    case wm::OpCallContext::ExecRegionPreview:
+      return "EXEC_REGION_PREVIEW";
+    case wm::OpCallContext::ExecArea:
+      return "EXEC_AREA";
+    case wm::OpCallContext::ExecScreen:
+      return "EXEC_SCREEN";
+  }
+  return "EXEC_DEFAULT";
+}
+
+static std::string ui_native_menu_operator_pystring(bContext *C, const Button *but)
+{
+  char idname_py[OP_MAX_TYPENAME];
+  WM_operator_py_idname(idname_py, but->optype->idname);
+  std::string pystring = std::string("bpy.ops.") + idname_py + "(";
+
+  PointerRNA opptr_default{};
+  PointerRNA *opptr = but->opptr;
+  if (opptr == nullptr) {
+    opptr_default = WM_operator_properties_create_ptr(but->optype);
+    opptr = &opptr_default;
+  }
+
+  pystring += RNA_pointer_as_string_keywords(
+      C, opptr, false, false, but->optype->macro.first ? true : false, 1024);
+
+  if (opptr == &opptr_default) {
+    WM_operator_properties_free(&opptr_default);
+  }
+
+  pystring += ")";
+  const std::string context_arg = std::string("'") +
+                                  ui_native_menu_operator_context_id(but->opcontext) + "'";
+  const size_t open_paren = pystring.find('(');
+  if (open_paren == std::string::npos) {
+    return pystring;
+  }
+  if (pystring[open_paren + 1] == ')') {
+    pystring.insert(open_paren + 1, context_arg);
+  }
+  else {
+    pystring.insert(open_paren + 1, context_arg + ", ");
+  }
+  return pystring;
+}
+
+static void ui_menutype_native_items_collect_with_stack(
+    bContext *C,
+    MenuType *mt,
+    blender::Vector<UINativeMenuItem> &items,
+    int depth,
+    blender::Vector<std::string> &menu_stack);
+
+static void ui_native_menu_items_from_layout(bContext *C,
+                                             Layout *layout,
+                                             blender::Vector<UINativeMenuItem> &items,
+                                             const int depth,
+                                             blender::Vector<std::string> &menu_stack)
+{
+  for (Item *item : layout->items()) {
+    if (item->type() != ItemType::Button) {
+      ui_native_menu_items_from_layout(
+          C, static_cast<Layout *>(item), items, depth, menu_stack);
+      continue;
+    }
+
+    Button *but = static_cast<ButtonItem *>(item)->but;
+    if (but->flag & UI_HIDDEN) {
+      continue;
+    }
+
+    if (ELEM(but->type, ButtonType::Sepr, ButtonType::SeprLine, ButtonType::SeprSpacer)) {
+      if (!items.is_empty() && items.last().type != UI_NATIVE_MENU_ITEM_SEPARATOR) {
+        items.append({UI_NATIVE_MENU_ITEM_SEPARATOR, depth, "", "", "", "", 0, true});
+      }
+      continue;
+    }
+
+    if (MenuType *submenu = button_menutype_get(but)) {
+      const std::string identifier = std::string("MENU:") + submenu->idname;
+      std::string title = ui_native_menu_button_title(but);
+      if (title.empty()) {
+        title = CTX_IFACE_(submenu->translation_context, submenu->label);
+      }
+
+      items.append({UI_NATIVE_MENU_ITEM_SUBMENU,
+                    depth,
+                    identifier,
+                    title,
+                    "",
+                    "",
+                    0,
+                    (but->flag & BUT_DISABLED) == 0});
+
+      if (std::find(menu_stack.begin(), menu_stack.end(), submenu->idname) == menu_stack.end()) {
+        menu_stack.append(submenu->idname);
+        ui_menutype_native_items_collect_with_stack(C, submenu, items, depth + 1, menu_stack);
+        menu_stack.pop_last();
+      }
+      continue;
+    }
+
+    if (but->optype) {
+      const std::string pystring = ui_native_menu_operator_pystring(C, but);
+      std::string key_equivalent;
+      int key_modifiers = UI_NATIVE_MENU_KEY_MODIFIER_NONE;
+      ui_native_menu_shortcut_from_button(C, but, key_equivalent, key_modifiers);
+      items.append({UI_NATIVE_MENU_ITEM_COMMAND,
+                    depth,
+                    std::string("PYOP:") + pystring,
+                    ui_native_menu_button_title(but),
+                    std::string("PYOP:") + pystring,
+                    key_equivalent,
+                    key_modifiers,
+                    (but->flag & BUT_DISABLED) == 0});
+    }
+  }
+}
+
+static void ui_menutype_native_items_collect_with_stack(
+    bContext *C,
+    MenuType *mt,
+    blender::Vector<UINativeMenuItem> &items,
+    const int depth,
+    blender::Vector<std::string> &menu_stack)
+{
+  if (mt == nullptr || WM_menutype_poll(C, mt) == false) {
+    return;
+  }
+
+  Block *block = block_begin(C, nullptr, __func__, EmbossType::Pulldown);
+  block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
+  Layout &layout = block_layout(block,
+                                LayoutDirection::Vertical,
+                                LayoutType::Menu,
+                                0,
+                                0,
+                                UI_MENU_WIDTH_MIN,
+                                0,
+                                0,
+                                style_get_dpi());
+  menutype_draw(C, mt, &layout);
+
+  ui_native_menu_items_from_layout(C, &layout, items, depth, menu_stack);
+
+  block_free(C, block);
+}
+
+void UI_menutype_native_items_collect(bContext *C,
+                                      MenuType *mt,
+                                      blender::Vector<UINativeMenuItem> &items,
+                                      const int depth)
+{
+  blender::Vector<std::string> menu_stack;
+  if (mt) {
+    menu_stack.append(mt->idname);
+  }
+  ui_menutype_native_items_collect_with_stack(C, mt, items, depth, menu_stack);
 }
 
 static bool ui_layout_has_panel_label(const Layout *layout, const PanelType *pt)

@@ -502,6 +502,17 @@ class GHOST_ISystem {
                                         const char * /*link*/,
                                         GHOST_DialogOptions /*dialog_options*/) const = 0;
 
+  /**
+   * Update native platform menu item labels and shortcuts.
+   *
+   * Back-ends without application-level native menus can ignore this.
+   */
+  virtual GHOST_TSuccess updateNativeMenu(const GHOST_TNativeMenuItem * /*items*/,
+                                          size_t /*items_num*/)
+  {
+    return GHOST_kFailure;
+  }
+
   /***************************************************************************************
    * Debugging
    ***************************************************************************************/

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+import sys
 from bpy.types import Header, Menu, Panel
 
 from bpy.app.translations import (
@@ -28,9 +29,9 @@ class TOPBAR_HT_upper_bar(Header):
         window = context.window
         screen = context.screen
 
-        TOPBAR_MT_editor_menus.draw_collapsible(context, layout)
-
-        layout.separator(type='LINE')
+        if sys.platform != "darwin":
+            TOPBAR_MT_editor_menus.draw_collapsible(context, layout)
+            layout.separator(type='LINE')
 
         if not screen.show_fullscreen:
             layout.template_ID_tabs(window, "workspace", new="workspace.add", menu="TOPBAR_MT_workspace_menu")
